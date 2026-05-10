@@ -2,6 +2,8 @@ from transcript_processor import TranscriptProcessor
 from summarizer import Summarizer
 from task_extractor import TaskExtractor
 from followup_generator import FollowupGenerator
+from fastapi import FastAPI
+from pydantic import BaseModel
 
 class HermesAgent:
     """
@@ -50,6 +52,21 @@ class HermesAgent:
             results["error"] = str(e)
             
         return results
+
+# Vercel Serverless Function App Entrypoint
+app = FastAPI(title="Hermes Smart Meeting API")
+
+class MeetingRequest(BaseModel):
+    transcript: str
+
+@app.post("/api/process")
+def process_meeting(request: MeetingRequest):
+    agent = HermesAgent()
+    return agent.run_workflow(request.transcript)
+
+@app.get("/")
+def health_check():
+    return {"status": "ok", "message": "Hermes API is running."}
 
 if __name__ == "__main__":
     # A simple test for the orchestrator
