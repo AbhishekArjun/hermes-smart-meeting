@@ -116,5 +116,34 @@ def gmail_send(to: str, subject: str, body: str):
     except Exception as e:
         typer.echo(f"Failed to send email: {e}", err=True)
 
+@app.command("run-all")
+def run_all(results_file: str, to: str = typer.Option(..., "--to")):
+    """Run all integrations: Calendar, Drive, and Gmail using a results.json file."""
+    import json
+    from gws_calendar import create_events_from_tasks
+    from gws_drive import upload_meeting_files
+    
+    try:
+        with open(results_file, 'r') as f:
+            data = json.load(f)
+            
+        typer.echo("Executing Calendar integration...")
+        events = create_events_from_tasks(data.get("tasks", []))
+        for e in events:
+            typer.echo(f"  Task '{e['task']}': {'Success' if e['success'] else 'Failed'}")
+            
+        typer.echo("\nExecuting Drive integration...")
+        drive_res = upload_meeting_files(data.get("transcript", ""), data.get("summary", ""))
+        if drive_res.get("success"):
+            typer.echo(f"  Transcript: {drive_res.get('transcript_link')}")
+            typer.echo(f"  Summary: {drive_res.get('summary_link')}")
+        else:
+            typer.echo(f"  Drive upload failed: {drive_res.get('error')}")
+            
+        typer.echo("\nExecuting Gmail integration...")
+        gmail_send(to, "Hermes Meeting Follow-up", data.get("followup_email", "No follow-up provided."))
+    except Exception as e:
+        typer.echo(f"run-all failed: {e}", err=True)
+
 if __name__ == "__main__":
     app()

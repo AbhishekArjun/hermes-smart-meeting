@@ -23,6 +23,7 @@ class HermesAgent:
         """
         results = {
             "status": "processing",
+            "transcript": None,
             "summary": None,
             "tasks": [],
             "followup_email": None,
@@ -32,6 +33,7 @@ class HermesAgent:
         try:
             # Step 1: Process and clean transcript
             clean_transcript = self.processor.process(raw_transcript)
+            results["transcript"] = clean_transcript
             
             # Step 2: Generate Summary
             results["summary"] = self.summarizer.summarize(clean_transcript)
