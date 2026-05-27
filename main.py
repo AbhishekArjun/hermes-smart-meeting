@@ -61,11 +61,22 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import os
 from config import Config
+from gws_calendar import create_events_from_tasks
+from gws_drive import upload_meeting_files
+from gws_cli import send_email_api
+from typing import Optional
 
 app = FastAPI(title="Hermes Smart Meeting API")
 
 class MeetingRequest(BaseModel):
     transcript: str
+
+class ExportRequest(BaseModel):
+    transcript: str
+    summary: str
+    tasks: list
+    followup_email: str
+    email_to: Optional[str] = None
 
 @app.post("/api/process")
 async def process_meeting(meeting_request: MeetingRequest, req: Request):
@@ -77,6 +88,43 @@ async def process_meeting(meeting_request: MeetingRequest, req: Request):
         
     agent = HermesAgent()
     return agent.run_workflow(meeting_request.transcript)
+
+@app.post("/api/export_gws")
+async def export_gws(export_request: ExportRequest):
+    results = {}
+    
+    # 1. Calendar Events
+    if export_request.tasks:
+        try:
+            results["calendar"] = create_events_from_tasks(export_request.tasks)
+        except Exception as e:
+            results["calendar"] = [{"error": str(e)}]
+    else:
+        results["calendar"] = []
+
+    # 2. Drive Upload
+    try:
+        results["drive"] = upload_meeting_files(
+            export_request.transcript, 
+            export_request.summary
+        )
+    except Exception as e:
+        results["drive"] = {"success": False, "error": str(e)}
+
+    # 3. Gmail Send
+    if export_request.email_to and export_request.followup_email:
+        try:
+            results["gmail"] = send_email_api(
+                to=export_request.email_to,
+                subject="Hermes Meeting Follow-up",
+                body=export_request.followup_email
+            )
+        except Exception as e:
+            results["gmail"] = {"success": False, "error": str(e)}
+    else:
+        results["gmail"] = {"success": False, "error": "No email_to provided"}
+
+    return results
 
 @app.get("/", response_class=HTMLResponse)
 def serve_ui():
@@ -333,15 +381,31 @@ def serve_ui():
                     <button class="tab active" onclick="switchTab('summary')">📝 Summary</button>
                     <button class="tab" onclick="switchTab('tasks')">✅ Action Items</button>
                     <button class="tab" onclick="switchTab('followup')">📧 Follow-up Email</button>
+                    <button class="tab" onclick="switchTab('export')">🚀 Export to GWS</button>
                 </div>
 
                 <div id="summaryContent" class="tab-content active"></div>
                 <div id="tasksContent" class="tab-content"></div>
                 <div id="followupContent" class="tab-content"></div>
+                <div id="exportContent" class="tab-content">
+                    <h3 style="margin-top:0;">Export to Google Workspace</h3>
+                    <p style="color:var(--text-muted); font-size:0.9rem;">Uploads transcript and summary to Google Drive, creates Calendar events for action items, and optionally sends the follow-up email.</p>
+                    <div class="input-group">
+                        <label for="exportEmail">Send Follow-up To (Email)</label>
+                        <input type="text" id="exportEmail" placeholder="recipient@example.com" style="width: 100%; padding: 1rem; border-radius: 12px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); color: white; margin-bottom: 1rem; box-sizing: border-box;">
+                    </div>
+                    <button id="exportBtn" onclick="exportToGWS()">
+                        <span class="export-button-text">🚀 Run Export</span>
+                        <div class="spinner" id="exportSpinner"></div>
+                    </button>
+                    <div id="exportResults" style="margin-top: 1.5rem; display: none;"></div>
+                </div>
             </div>
         </div>
 
         <script>
+            let latestWorkflowData = null;
+
             function switchTab(tabId) {
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
                 document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -380,6 +444,7 @@ def serve_ui():
                     });
 
                     const data = await response.json();
+                    latestWorkflowData = data;
 
                     if (!response.ok) throw new Error(data.detail || 'API request failed');
                     if (data.status === 'failed') throw new Error(data.error || 'Agent workflow failed');
@@ -413,6 +478,84 @@ def serve_ui():
                     btn.disabled = false;
                     btnText.classList.remove('hidden');
                     spinner.style.display = 'none';
+                }
+            }
+
+            async function exportToGWS() {
+                if (!latestWorkflowData || latestWorkflowData.status !== 'success') {
+                    showError("Please run the Hermes Agent successfully first.");
+                    return;
+                }
+
+                const emailTo = document.getElementById('exportEmail').value;
+                const btn = document.getElementById('exportBtn');
+                const btnText = document.querySelector('.export-button-text');
+                const spinner = document.getElementById('exportSpinner');
+                const resultsDiv = document.getElementById('exportResults');
+
+                btn.disabled = true;
+                if (btnText) btnText.classList.add('hidden');
+                if (spinner) spinner.style.display = 'block';
+                resultsDiv.style.display = 'none';
+                resultsDiv.innerHTML = '';
+
+                try {
+                    const response = await fetch('/api/export_gws', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            transcript: latestWorkflowData.transcript || document.getElementById('transcript').value,
+                            summary: latestWorkflowData.summary || "",
+                            tasks: latestWorkflowData.tasks || [],
+                            followup_email: latestWorkflowData.followup_email || "",
+                            email_to: emailTo || null
+                        })
+                    });
+
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.detail || 'Export request failed');
+
+                    let html = '<h4 style="margin-top:0; margin-bottom: 0.5rem; color:#60a5fa;">Export Results:</h4><ul style="list-style:none; padding:0; margin:0;">';
+                    
+                    // Drive
+                    if (data.drive && data.drive.success) {
+                        html += `<li style="margin-bottom:0.5rem;">✅ <b>Drive:</b> Uploaded <a href="${data.drive.transcript_link}" target="_blank" style="color: #60a5fa;">Transcript</a>, <a href="${data.drive.summary_link}" target="_blank" style="color: #60a5fa;">Summary</a></li>`;
+                    } else {
+                        html += `<li style="margin-bottom:0.5rem; color:#ef4444;">❌ <b>Drive:</b> Failed - ${data.drive ? data.drive.error : 'Unknown'}</li>`;
+                    }
+
+                    // Calendar
+                    if (data.calendar && data.calendar.length > 0) {
+                        const successes = data.calendar.filter(c => c.success);
+                        html += `<li style="margin-bottom:0.5rem;">📅 <b>Calendar:</b> Created ${successes.length} event(s).</li>`;
+                    } else if (latestWorkflowData.tasks && latestWorkflowData.tasks.length > 0) {
+                        html += `<li style="margin-bottom:0.5rem; color:#ef4444;">❌ <b>Calendar:</b> Failed to create events.</li>`;
+                    } else {
+                        html += `<li style="margin-bottom:0.5rem;">📅 <b>Calendar:</b> No tasks to create.</li>`;
+                    }
+
+                    // Gmail
+                    if (emailTo) {
+                        if (data.gmail && data.gmail.success) {
+                            html += `<li style="margin-bottom:0.5rem;">✅ <b>Gmail:</b> Sent successfully. Message ID: ${data.gmail.message_id}</li>`;
+                        } else {
+                            html += `<li style="margin-bottom:0.5rem; color:#ef4444;">❌ <b>Gmail:</b> Failed - ${data.gmail ? data.gmail.error : 'Unknown'}</li>`;
+                        }
+                    } else {
+                        html += `<li style="margin-bottom:0.5rem; color:#94a3b8;">ℹ️ <b>Gmail:</b> Skipped (no email provided).</li>`;
+                    }
+
+                    html += '</ul>';
+                    resultsDiv.innerHTML = html;
+                    resultsDiv.style.display = 'block';
+
+                } catch (err) {
+                    resultsDiv.innerHTML = `<div class="error" style="display:block; margin-top:0;">⚠️ Export Error: ${err.message}</div>`;
+                    resultsDiv.style.display = 'block';
+                } finally {
+                    btn.disabled = false;
+                    if (btnText) btnText.classList.remove('hidden');
+                    if (spinner) spinner.style.display = 'none';
                 }
             }
 

@@ -95,26 +95,34 @@ def drive_upload(filepath: str, filename: str = None):
 
 # --- GMAIL COMMANDS ---
 
-@gmail_app.command("send")
-def gmail_send(to: str, subject: str, body: str):
-    """Send an email using Gmail."""
+def send_email_api(to: str, subject: str, body: str) -> dict:
+    """Helper function to send email programmatically."""
     try:
         service = get_service("gmail", "v1")
         
         message = EmailMessage()
         message.set_content(body)
         message['To'] = to
-        message['From'] = 'me' # Gmail API uses 'me' for authenticated user
+        message['From'] = 'me'
         message['Subject'] = subject
         
         encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
         create_message = {'raw': encoded_message}
         
-        typer.echo(f"Sending email to {to}...")
         send_message = service.users().messages().send(userId="me", body=create_message).execute()
-        typer.echo(f"Email sent! Message ID: {send_message['id']}")
+        return {"success": True, "message_id": send_message['id']}
     except Exception as e:
-        typer.echo(f"Failed to send email: {e}", err=True)
+        return {"success": False, "error": str(e)}
+
+@gmail_app.command("send")
+def gmail_send(to: str, subject: str, body: str):
+    """Send an email using Gmail."""
+    typer.echo(f"Sending email to {to}...")
+    result = send_email_api(to, subject, body)
+    if result.get("success"):
+        typer.echo(f"Email sent! Message ID: {result['message_id']}")
+    else:
+        typer.echo(f"Failed to send email: {result.get('error')}", err=True)
 
 @app.command("run-all")
 def run_all(results_file: str, to: str = typer.Option(..., "--to")):
